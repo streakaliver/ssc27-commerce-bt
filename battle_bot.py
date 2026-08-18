@@ -334,12 +334,15 @@ async def ensure_authenticated(env, force_login=False):
 def create_battle_rooms(session, count):
     urls = []
     print(f"[*] Starting creation of {count} battle room(s)...")
-    for i in range(1, count + 1):
+    attempts = 0
+    max_attempts = max(count * 20, 100)
+    while len(urls) < count and attempts < max_attempts:
+        attempts += 1
         topic = random.choice(TOPICS_LIST)
         topic_id = topic['TOPIC_ID']
         topic_name = topic['TOPIC_NAME']
 
-        print(f"[{i}/{count}] Selecting topic: {topic_name} (ID: {topic_id})")
+        print(f"[{len(urls) + 1}/{count}] Trying topic: {topic_name} (ID: {topic_id})")
 
         # Step 1: Quick Exam API
         quick_url = "https://mujib.chorcha.net/exam/quick"
@@ -348,7 +351,14 @@ def create_battle_rooms(session, count):
             if res.status_code != 200:
                 print(f"    [-] Quick Exam API failed with status {res.status_code}")
                 continue
-            druto_id = res.json().get('data', {}).get('druto_id')
+            
+            res_data = res.json()
+            if res_data.get('status') == 'error':
+                msg = res_data.get('data') or 'Error'
+                print(f"    [-] Topic skipped ({msg})")
+                continue
+
+            druto_id = res_data.get('data', {}).get('druto_id')
             if not druto_id:
                 print(f"    [-] druto_id not found in response: {res.text}")
                 continue
@@ -372,7 +382,7 @@ def create_battle_rooms(session, count):
                 continue
 
             battle_url = f"https://chorcha.net/battle/{room_id}?topic={urllib.parse.quote(topic_name)}&druto_id={druto_id}"
-            print(f"    [+] Created battle room: {battle_url}")
+            print(f"    [+] Created battle room ({len(urls) + 1}/{count}): {battle_url}")
             urls.append(battle_url)
             
             # Delay to avoid rate limiting
@@ -655,15 +665,19 @@ def test_session_validity(session):
     test_url = "https://mujib.chorcha.net/exam/quick"
     if not TOPICS_LIST:
         return False
-    topic_id = TOPICS_LIST[0]['TOPIC_ID']
-    try:
-        res = session.post(test_url, json={"topics": [topic_id], "type": "BATTLE"}, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get('status') != 'error' and data.get('data', {}).get('druto_id'):
-                return True
-    except Exception as e:
-        print(f"[-] Session test request failed: {e}")
+    for topic in TOPICS_LIST[:10]:
+        topic_id = topic['TOPIC_ID']
+        try:
+            res = session.post(test_url, json={"topics": [topic_id], "type": "BATTLE"}, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                # Session is valid if status is success (druto_id received) or if error message indicates questions are already practiced
+                if data.get('status') == 'success' and data.get('data', {}).get('druto_id'):
+                    return True
+                if isinstance(data.get('data'), str) and 'practiced' in data.get('data').lower():
+                    return True
+        except Exception as e:
+            print(f"[-] Session test request failed: {e}")
     return False
 
 def main():
