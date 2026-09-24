@@ -456,7 +456,16 @@ async def play_battle(context, url_idx, url, session):
     print(f"[+] [{url_idx}] Loaded {len(answers_map)} answers.")
     
     page = await context.new_page()
-    await page.goto(url)
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    except Exception as e:
+        print(f"[-] [{url_idx}] page.goto timed out or failed: {e}")
+        try:
+            await page.close()
+        except Exception:
+            pass
+        return
+
     try:
         await page.wait_for_load_state("networkidle", timeout=10000)
     except Exception:
@@ -465,11 +474,13 @@ async def play_battle(context, url_idx, url, session):
     # Click "ব্যাটেল শুরু করো"
     try:
         start_btn = page.locator("button:has-text('ব্যাটেল শুরু করো')")
-        await start_btn.wait_for(state="visible", timeout=10000)
+        await start_btn.wait_for(state="visible", timeout=15000)
         await start_btn.click()
         print(f"[+] [{url_idx}] Clicked 'ব্যাটেল শুরু করো'")
     except Exception as e:
         print(f"[-] [{url_idx}] Start button not found or click failed (maybe already started): {e}")
+    
+    OPTION_SELECTOR = "button.custom-scrollbar, button.flex.w-full.gap-2.rounded-lg, button.flex.w-full.items-center.gap-2.rounded-xl"
     
     # Wait for battle to start (when 4 non-empty option buttons appear)
     print(f"[*] [{url_idx}] Waiting for opponent to join and battle to start...")
@@ -478,8 +489,8 @@ async def play_battle(context, url_idx, url, session):
     
     while True:
         try:
-            # Find all buttons
-            buttons = await page.locator("button.custom-scrollbar, button.flex.w-full.gap-2.rounded-lg").all()
+            # Find all buttons matching option selectors
+            buttons = await page.locator(OPTION_SELECTOR).all()
             non_empty_buttons = []
             for btn in buttons:
                 try:
@@ -512,7 +523,16 @@ async def play_battle(context, url_idx, url, session):
     
     while answered_count < total_questions:
         # Find current options
-        buttons = await page.locator("button.custom-scrollbar, button.flex.w-full.gap-2.rounded-lg").all()
+        all_buttons = await page.locator(OPTION_SELECTOR).all()
+        buttons = []
+        for btn in all_buttons:
+            try:
+                txt = (await btn.inner_text()).strip()
+                if txt:
+                    buttons.append(btn)
+            except Exception:
+                pass
+                
         if len(buttons) < 4:
             await page.wait_for_timeout(500)
             consecutive_misses += 1
@@ -549,7 +569,7 @@ async def play_battle(context, url_idx, url, session):
         # Retrieve question text via page.evaluate
         try:
             question_text = await page.evaluate("""() => {
-                const btns = Array.from(document.querySelectorAll('button.custom-scrollbar, button.flex.w-full.gap-2.rounded-lg')).filter(b => b.innerText.trim() !== "");
+                const btns = Array.from(document.querySelectorAll('button.custom-scrollbar, button.flex.w-full.gap-2.rounded-lg, button.flex.w-full.items-center.gap-2.rounded-xl')).filter(b => b.innerText.trim() !== "");
                 if (btns.length === 0) return "";
                 const firstBtn = btns[0];
                 const parent = firstBtn.parentElement;
@@ -636,10 +656,13 @@ async def play_battle(context, url_idx, url, session):
             screenshot_path
         )
     
-    await page.close()
+    try:
+        await page.close()
+    except Exception:
+        pass
     print(f"[+] [{url_idx}] Finished Battle.")
 
-async def run_battle_automation(urls, cookies_list, session):
+async def run_battle_automation(urls, cookies_list, session, batch_size=4):
     formatted_cookies = format_cookies_for_playwright(cookies_list)
     
     async with async_playwright() as p:
@@ -649,14 +672,31 @@ async def run_battle_automation(urls, cookies_list, session):
         context = await browser.new_context()
         await context.add_cookies(formatted_cookies)
         
-        print("[*] Playwright browser launched and cookies injected.")
+        print(f"[*] Playwright browser launched and cookies injected. Running in batches of {batch_size} tabs concurrently...")
         
-        # Start all battles in parallel
-        tasks = []
-        for url_idx, url in enumerate(urls, 1):
-            tasks.append(play_battle(context, url_idx, url, session))
+        # Split URLs into batches of batch_size (e.g. 3)
+        total_urls = len(urls)
+        for i in range(0, total_urls, batch_size):
+            batch_urls = urls[i:i + batch_size]
+            current_batch_num = (i // batch_size) + 1
+            total_batches = (total_urls + batch_size - 1) // batch_size
+            print(f"\n========================================================")
+            print(f"[*] Starting Batch {current_batch_num}/{total_batches} ({len(batch_urls)} battles in parallel)")
+            print(f"========================================================")
+            
+            tasks = []
+            for batch_offset, url in enumerate(batch_urls):
+                url_idx = i + batch_offset + 1
+                tasks.append(play_battle(context, url_idx, url, session))
+                
+            # Run the current batch of tabs in parallel
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            print(f"[+] Batch {current_batch_num}/{total_batches} completed.")
+            if i + batch_size < total_urls:
+                print("[*] Waiting 2 seconds before launching next batch in same browser instance...")
+                await asyncio.sleep(2)
         
-        await asyncio.gather(*tasks)
         await context.close()
         await browser.close()
     print("\n[*] All automation runs completed successfully!")
